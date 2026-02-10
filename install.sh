@@ -1,202 +1,206 @@
 #!/bin/bash
-
 # ==========================================
-# AUTO INSTALLER ZIVPN + BOT TELEGRAM + MENU PELANGI
+# ZIVPN UDP All-in-One Installer
+# Binary: v1.4.9 | Official Config
+# Setup: Manager, API, Bot, Shortcuts
 # ==========================================
 
-# Warna Standar Bash
-BIWhite='\033[1;97m'
-NC='\033[0m'
+# 1. Check Root
+[[ $EUID -ne 0 ]] && echo "Error: Root required!" && exit 1
 
-# Pastikan Root
-if [[ $EUID -ne 0 ]]; then
-   echo "Gunakan akses root!"
-   exit 1
-fi
+echo "Memulai Instalasi ZIVPN UDP..."
 
-clear
-echo -e "${BIWhite}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "     ZIVPN ALL-IN-ONE INSTALLER & BOT" | lolcat
-echo -e "${BIWhite}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+# 2. Install Dependencies
+apt update && apt install -y jq curl wget openssl python3 python3-pip python3-flask python3-dotenv python3-telebot python3-requests fuser vnstat
+systemctl enable vnstat && systemctl start vnstat
 
-# Input Konfigurasi
-read -p " 1. Masukkan Token Bot Telegram : " BOT_TOKEN
-read -p " 2. Masukkan ID Telegram Admin  : " ADMIN_ID
+# 3. Setup Folder & Download Files
+mkdir -p /etc/zivpn/certs
+CONFIG_FILE="/etc/zivpn/config.json"
+META_FILE="/etc/zivpn/accounts_meta.json"
+ENV_FILE="/etc/zivpn/bot.env"
 
-# Install Dependensi & Lolcat
-echo -e "\n[+] Menginstall Dependensi..."
-apt update -y && apt install python3 python3-pip ruby lsb-release -y > /dev/null 2>&1
-gem install lolcat > /dev/null 2>&1
-pip3 install pyTelegramBotAPI > /dev/null 2>&1
+echo "Downloading Official Binary & Config..."
+wget -q -O /usr/local/bin/zivpn-core "https://github.com/zahidbd2/udp-zivpn/releases/download/udp-zivpn_1.4.9/udp-zivpn-linux-amd64"
+chmod +x /usr/local/bin/zivpn-core
 
-# Buat Direktori Kerja
-mkdir -p /etc/zivpn
-if [ ! -f /etc/zivpn/config.json ]; then
-    echo '{"domain": "Belum diatur", "users": []}' > /etc/zivpn/config.json
-fi
+wget -q -O "$CONFIG_FILE" "https://raw.githubusercontent.com/zahidbd2/udp-zivpn/main/config.json"
 
-# ---------------------------------------------------------
-# 1. MEMBUAT MENU VPS CLI (Tampilan Pelangi)
-# ---------------------------------------------------------
-cat <<EOF > /usr/bin/menu
+[ ! -f "$META_FILE" ] && echo '{"accounts":[]}' > "$META_FILE"
+[[ ! -f "$ENV_FILE" ]] && echo -e "BOT_TOKEN=BELUM_DISET\nADMIN_ID=BELUM_DISET\nAPI_KEY=$(openssl rand -hex 16)" > "$ENV_FILE"
+
+# 4. Create Manager Script (/usr/local/bin/zivpn-manager)
+cat <<'EOF' > /usr/local/bin/zivpn-manager
 #!/bin/bash
-clear
-echo "──────────────────────────────────────────────" | lolcat
-echo "         ZiVPN PREMIER SCRIPT MENU            " | lolcat -a -d 2
-echo "──────────────────────────────────────────────" | lolcat
-echo " OS      : \$(lsb_release -ds)" | lolcat
-echo " Hostname: \$(hostname)" | lolcat
-echo " IP VPS  : \$(curl -s ifconfig.me)" | lolcat
-echo "──────────────────────────────────────────────" | lolcat
-echo -e " [1] Create Akun ZiVPN" | lolcat
-echo -e " [2] Hapus Akun ZiVPN" | lolcat
-echo -e " [3] Atur Domain" | lolcat
-echo -e " [4] Info Status VPS" | lolcat
-echo -e " [5] List Users" | lolcat
-echo -e " [x] Keluar" | lolcat
-echo "──────────────────────────────────────────────" | lolcat
-read -p " Pilih menu [1-5]: " menu_choice
+CONFIG_FILE="/etc/zivpn/config.json"
+META_FILE="/etc/zivpn/accounts_meta.json"
+ENV_FILE="/etc/zivpn/bot.env"
 
-case \$menu_choice in
-    1) /usr/bin/zivpn create ;;
-    2) /usr/bin/zivpn delete ;;
-    3) read -p "Domain: " d; echo "\$d" > /etc/xray/domain; echo "Domain Diupdate!" ;;
-    4) uptime -p | lolcat ;;
-    5) cat /etc/zivpn/config.json | lolcat ;;
-    x) exit ;;
+show_config() {
+    local u=$1; local p=$2
+    local dom=$(jq -r '.domain' $CONFIG_FILE)
+    local ip=$(curl -s ipv4.icanhazip.com)
+    [[ -z "$dom" || "$dom" == "null" ]] && host=$ip || host=$dom
+    echo ""
+    echo "--- ZIVPN ACCOUNT INFO ---"
+    echo "Host/Domain: $host"
+    echo "IP Server  : $ip"
+    echo "Username   : $u"
+    echo "Password   : $p"
+    echo "--------------------------"
+    echo ""
+}
+
+get_info() {
+    echo "--- VPS & BANDWIDTH INFO ---"
+    vnstat -d | grep "today"
+    echo "CPU Usage: $(top -bn1 | grep 'Cpu(s)' | awk '{print $2}')%"
+    echo "RAM Usage: $(free -m | awk '/Mem:/ { print $3 "/" $2 "MB" }')"
+}
+
+add_user() {
+    [ -z "$1" ] && read -p "User: " u || u=$1
+    [ -z "$2" ] && read -p "Pass: " p || p=$2
+    [ -z "$3" ] && read -p "Days: " d || d=$3
+    exp=$(date -d "+$d days" +"%Y-%m-%d")
+    jq --arg u "$u" --arg p "$p" '.auth.config += [{"username":$u, "password":$p}]' "$CONFIG_FILE" > tmp.json && mv tmp.json "$CONFIG_FILE"
+    jq --arg u "$u" --arg e "$exp" '.accounts += [{"username":$u, "exp":$e}]' "$META_FILE" > tmp.json && mv tmp.json "$META_FILE"
+    systemctl restart zivpn
+    show_config "$u" "$p"
+}
+
+renew_user() {
+    read -p "Username: " u
+    read -p "Add Days: " d
+    old_exp=$(jq -r --arg u "$u" '.accounts[] | select(.username==$u) | .exp' "$META_FILE")
+    new_exp=$(date -d "$old_exp +$d days" +"%Y-%m-%d")
+    jq --arg u "$u" --arg e "$new_exp" '(.accounts[] | select(.username==$u) | .exp) = $e' "$META_FILE" > tmp.json && mv tmp.json "$META_FILE"
+    echo "User $u diperpanjang sampai $new_exp"
+}
+
+delete_user() {
+    [ -z "$1" ] && read -p "User to delete: " u || u=$1
+    jq --arg u "$u" 'del(.auth.config[] | select(.username == $u))' "$CONFIG_FILE" > tmp.json && mv tmp.json "$CONFIG_FILE"
+    jq --arg u "$u" 'del(.accounts[] | select(.username == $u))' "$META_FILE" > tmp.json && mv tmp.json "$META_FILE"
+    systemctl restart zivpn
+    echo "User $u deleted."
+}
+
+change_domain() {
+    read -p "Enter New Domain: " dom
+    [ ! -f "$HOME/.acme.sh/acme.sh" ] && curl https://get.acme.sh | sh
+    systemctl stop zivpn && fuser -k 80/tcp
+    ~/.acme.sh/acme.sh --issue -d "$dom" --standalone --force
+    ~/.acme.sh/acme.sh --install-cert -d "$dom" --key-file "/etc/zivpn/certs/private.key" --fullchain-file "/etc/zivpn/certs/fullchain.pem"
+    jq --arg d "$dom" '.domain = $d' "$CONFIG_FILE" > tmp.json && mv tmp.json "$CONFIG_FILE"
+    systemctl start zivpn
+}
+
+case $1 in
+    add_silent) add_user $2 $3 $4 ;;
+    del_silent) delete_user $2 ;;
+    *)
+        echo "ZIVPN MANAGER"
+        echo "1. Add User"
+        echo "2. Delete User"
+        echo "3. Renew User"
+        echo "4. Change Domain"
+        echo "5. Info VPS"
+        echo "6. Setup Bot"
+        echo "7. Exit"
+        read -p "Pilihan: " opt
+        case $opt in
+            1) add_user ;; 2) delete_user ;; 3) renew_user ;; 4) change_domain ;; 5) get_info ;; 6) 
+                read -p "Token: " t; read -p "ID: " id
+                sed -i "s/BOT_TOKEN=.*/BOT_TOKEN=$t/" "$ENV_FILE"
+                sed -i "s/ADMIN_ID=.*/ADMIN_ID=$id/" "$ENV_FILE"
+                systemctl restart zivpn-bot ;;
+            *) exit ;;
+        esac
+    ;;
 esac
 EOF
-chmod +x /usr/bin/menu
+chmod +x /usr/local/bin/zivpn-manager
 
-# ---------------------------------------------------------
-# 2. MEMBUAT FILE PYTHON BOT TELEGRAM
-# ---------------------------------------------------------
-cat <<EOF > /etc/zivpn/bot.py
-import telebot
-import subprocess
-import json
-import os
-from telebot import types
+# 5. Create Bot Script
+cat <<'EOF' > /usr/local/bin/zivpn-bot.py
+import telebot, os, json, subprocess
+from dotenv import load_dotenv
 
-TOKEN = "$BOT_TOKEN"
-ADMIN_ID = $ADMIN_ID
-BINARY_PATH = "/usr/bin/zivpn"
-CONFIG_PATH = "/etc/zivpn/config.json"
+load_dotenv('/etc/zivpn/bot.env')
+token = os.getenv("BOT_TOKEN")
+admin_id = os.getenv("ADMIN_ID")
 
-bot = telebot.TeleBot(TOKEN)
+if token and token != "BELUM_DISET":
+    bot = telebot.TeleBot(token)
 
-def run_shell(command):
-    try:
-        process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        stdout, stderr = process.communicate()
-        return stdout.strip() if stdout else stderr.strip()
-    except Exception as e: return str(e)
-
-def main_menu():
-    markup = types.InlineKeyboardMarkup(row_width=2)
-    markup.add(
-        types.InlineKeyboardButton("➕ Create Akun", callback_data="create_acc"),
-        types.InlineKeyboardButton("🗑️ Hapus Akun", callback_data="del_acc"),
-        types.InlineKeyboardButton("🌐 Set Domain", callback_data="set_dom"),
-        types.InlineKeyboardButton("📊 Info VPS", callback_data="vps_info"),
-        types.InlineKeyboardButton("📜 List Users", callback_data="list_users")
-    )
-    return markup
-
-@bot.message_handler(commands=['start', 'menu'])
-@bot.message_handler(func=lambda message: message.text.lower() in ['menu', 'zivpn', 'panel', 'start'])
-def send_welcome(message):
-    if message.from_user.id != ADMIN_ID: return
-    ip = run_shell("curl -s ifconfig.me")
-    header = (
-        f"<code>──────────────────────────────</code>\n"
-        f"   <b>ZiVPN PREMIER SCRIPT MENU</b>\n"
-        f"<code>──────────────────────────────</code>\n"
-        f" <b>Hostname :</b> {run_shell('hostname')}\n"
-        f" <b>IP VPS   :</b> {ip}\n"
-        f" <b>Status   :</b> Online\n"
-        f"<code>──────────────────────────────</code>"
-    )
-    bot.send_message(message.chat.id, header, parse_mode="HTML", reply_markup=main_menu())
-
-@bot.callback_query_handler(func=lambda call: True)
-def callback_query(call):
-    if call.data == "create_acc":
-        msg = bot.send_message(call.message.chat.id, "✨ <b>Format:</b> <code>user,pw,hari</code>", parse_mode="HTML")
-        bot.register_next_step_handler(msg, process_create)
-    elif call.data == "del_acc":
-        msg = bot.send_message(call.message.chat.id, "🗑️ <b>Username yang dihapus:</b>", parse_mode="HTML")
-        bot.register_next_step_handler(msg, process_delete)
-    elif call.data == "set_dom":
-        msg = bot.send_message(call.message.chat.id, "🌐 <b>Masukkan Domain Baru:</b>", parse_mode="HTML")
-        bot.register_next_step_handler(msg, process_domain)
-    elif call.data == "vps_info":
-        ram = run_shell(\"free -h | grep Mem | awk '{print \$3 \\\"/\\\" \$2}'\")
-        bot.send_message(call.message.chat.id, f"📊 <b>VPS INFO</b>\n<code>RAM: {ram}\nUPTIME: {run_shell('uptime -p')}</code>", parse_mode="HTML", reply_markup=main_menu())
-    elif call.data == "list_users":
-        with open(CONFIG_PATH, 'r') as f:
+    def get_host():
+        with open("/etc/zivpn/config.json", "r") as f:
             data = json.load(f)
-        users = "\\n".join([f"• {u['user']} ({u['exp']} hari)" for u in data['users']])
-        bot.send_message(call.message.chat.id, f"<b>LIST USERS:</b>\\n<code>{users if users else 'Kosong'}</code>", parse_mode="HTML", reply_markup=main_menu())
+            dom = data.get("domain", "")
+        return dom if dom and dom != "null" else subprocess.getoutput("curl -s ipv4.icanhazip.com")
 
-def process_create(message):
-    try:
-        user, pw, days = message.text.split(',')
-        run_shell(f"{BINARY_PATH} create {user} {pw} {days}")
-        with open(CONFIG_PATH, 'r+') as f:
-            data = json.load(f)
-            data['users'].append({"user": user, "pw": pw, "exp": days})
-            f.seek(0); json.dump(data, f, indent=4); f.truncate()
-        ip = run_shell("curl -s ifconfig.me")
-        res = f"✅ <b>AKUN DIBUAT</b>\\n<code>Host: {ip}\\nUser: {user}\\nPass: {pw}\\nExp: {days} Hari</code>"
-        bot.send_message(message.chat.id, res, parse_mode="HTML", reply_markup=main_menu())
-    except: bot.reply_to(message, "❌ Format salah!")
+    @bot.message_handler(commands=['add'])
+    def add(m):
+        if str(m.from_user.id) != admin_id: return
+        try:
+            _, u, p, d = m.text.split()
+            os.system(f"zivpn-manager add_silent {u} {p} {d}")
+            host = get_host()
+            msg = f"Account Created\n\nHost/Domain: {host}\nIP Server: {host}\nUsername: {u}\nPassword: {p}"
+            bot.reply_to(m, msg)
+        except: bot.reply_to(m, "Format: /add user pass days")
 
-def process_delete(message):
-    user = message.text.strip()
-    run_shell(f"{BINARY_PATH} delete {user}")
-    with open(CONFIG_PATH, 'r+') as f:
-        data = json.load(f)
-        data['users'] = [u for u in data['users'] if u['user'] != user]
-        f.seek(0); json.dump(data, f, indent=4); f.truncate()
-    bot.send_message(message.chat.id, f"🗑️ User <b>{user}</b> Dihapus.", parse_mode="HTML", reply_markup=main_menu())
+    @bot.message_handler(commands=['del'])
+    def delete(m):
+        if str(m.from_user.id) != admin_id: return
+        try:
+            u = m.text.split()[1]
+            os.system(f"zivpn-manager del_silent {u}")
+            bot.reply_to(m, f"User {u} deleted.")
+        except: bot.reply_to(m, "Format: /del user")
 
-def process_domain(message):
-    dom = message.text.strip()
-    run_shell(f"echo '{dom}' > /etc/xray/domain")
-    with open(CONFIG_PATH, 'r+') as f:
-        data = json.load(f)
-        data['domain'] = dom
-        f.seek(0); json.dump(data, f, indent=4); f.truncate()
-    bot.send_message(message.chat.id, f"✅ Domain diatur: <code>{dom}</code>", parse_mode="HTML", reply_markup=main_menu())
+    @bot.message_handler(commands=['info'])
+    def info(m):
+        if str(m.from_user.id) != admin_id: return
+        bw = subprocess.getoutput("vnstat --oneline | cut -d';' -f11")
+        bot.reply_to(m, f"VPS Info\nBandwidth Today: {bw}")
 
-bot.polling(none_stop=True)
+    bot.polling()
 EOF
 
-# ---------------------------------------------------------
-# 3. MEMBUAT SYSTEMD SERVICE (Bot Auto-Start)
-# ---------------------------------------------------------
-cat <<EOF > /etc/systemd/system/zivpn-bot.service
+# 6. Systemd Services
+cat <<EOF > /etc/systemd/system/zivpn.service
 [Unit]
-Description=ZiVPN Telegram Bot
+Description=ZIVPN UDP Core
 After=network.target
-
 [Service]
-ExecStart=/usr/bin/python3 /etc/zivpn/bot.py
+ExecStart=/usr/local/bin/zivpn-core -config /etc/zivpn/config.json
 Restart=always
-User=root
-
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Jalankan Service
-systemctl daemon-reload
-systemctl enable zivpn-bot
-systemctl start zivpn-bot
+cat <<EOF > /etc/systemd/system/zivpn-bot.service
+[Unit]
+Description=ZIVPN Bot
+After=network.target
+[Service]
+ExecStart=/usr/bin/python3 /usr/local/bin/zivpn-bot.py
+Restart=always
+[Install]
+WantedBy=multi-user.target
+EOF
 
-echo -e "\n${BIWhite}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "   INSTALLASI SELESAI!" | lolcat
-echo -e "   - Ketik 'menu' di VPS untuk Menu Pelangi"
-echo -e "   - Ketik 'menu' di Bot Telegram untuk Panel"
-echo -e "${BIWhite}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
+# 7. Shortcuts & Firewall
+ln -sf /usr/local/bin/zivpn-manager /usr/local/bin/menu
+ln -sf /usr/local/bin/zivpn-manager /usr/local/bin/zivpn
+ufw allow 5667/udp
+ufw allow 80/tcp
+
+# 8. Start Everything
+systemctl daemon-reload
+systemctl enable zivpn zivpn-bot
+systemctl start zivpn zivpn-bot
+
+echo "Instalasi Selesai. Ketik 'menu' untuk memulai."
