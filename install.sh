@@ -1,121 +1,227 @@
 #!/bin/bash
-# ==========================================
-# ZIVPN UDP Ultimate Installer (Fix Binary & Library)
-# Support: Ubuntu/Debian x86_64
-# ==========================================
+# Zivpn UDP Module Manager (Full Version)
+# All-in-One: Installer, VPS Dashboard, & Telegram Bot
 
-# 1. Check Root & Architecture
-[[ $EUID -ne 0 ]] && echo "Error: Root required!" && exit 1
-ARCH=$(uname -m)
-if [[ "$ARCH" != "x86_64" ]]; then
-    echo "Error: Binary ini hanya mendukung arsitektur x86_64 (AMD64)."
-    exit 1
-fi
-
-echo "--- 1. Installing System Libraries ---"
-apt update
-apt install -y jq curl wget openssl python3 python3-pip python3-flask python3-dotenv \
-python3-telebot python3-requests fuser vnstat libc6-dev libgcc-s1
-
-# 2. Setup Folder
-mkdir -p /etc/zivpn/certs
 CONFIG_FILE="/etc/zivpn/config.json"
-META_FILE="/etc/zivpn/accounts_meta.json"
-ENV_FILE="/etc/zivpn/bot.env"
+BIN_PATH="/usr/local/bin/zivpn"
+MENU_PATH="/usr/local/bin/zivpn"
+BOT_SCRIPT="/etc/zivpn/zivpn-bot.sh"
 
-echo "--- 2. Downloading & Installing Binary ---"
-# Menggunakan curl -L agar mengikuti redirect GitHub yang sering bikin wget gagal
-curl -L -o /usr/local/bin/zivpn-core "https://github.com/zahidbd2/udp-zivpn/releases/download/udp-zivpn_1.4.9/udp-zivpn-linux-amd64"
-chmod +x /usr/local/bin/zivpn-core
+# --- Fungsi Pendukung ---
+get_ip() { curl -s https://ifconfig.me; }
 
-# Verifikasi Binary
-if ! /usr/local/bin/zivpn-core -v >/dev/null 2>&1; then
-    echo "Warning: Binary tidak merespon perintah -v, mencoba perbaikan izin..."
-    chmod 755 /usr/local/bin/zivpn-core
-fi
+# --- Fungsi Instalasi Utama ---
+install_zivpn() {
+    clear
+    echo "======================================"
+    echo "      MEMULAI INSTALASI ZIVPN         "
+    echo "======================================"
+    echo "Mengupdate Server & Dependensi..."
+    sudo apt-get update && sudo apt-get install jq curl lsb-release -y
+    
+    systemctl stop zivpn.service 1> /dev/null 2> /dev/null
+    
+    echo "Mendownload UDP Service..."
+    wget https://github.com/zahidbd2/udp-zivpn/releases/download/udp-zivpn_1.4.9/udp-zivpn-linux-amd64 -O $BIN_PATH 1> /dev/null 2> /dev/null
+    chmod +x $BIN_PATH
+    mkdir -p /etc/zivpn
+    wget https://raw.githubusercontent.com/zahidbd2/udp-zivpn/main/config.json -O $CONFIG_FILE 1> /dev/null 2> /dev/null
 
-echo "--- 3. Setup Official Config (Clean SSL) ---"
-# Kita buat config dasar yang aman agar binary tidak crash karena SSL kosong
-cat <<EOF > "$CONFIG_FILE"
-{
-  "listen": ":5667",
-  "auth": {
-    "config": []
-  },
-  "domain": "",
-  "cert_file": "",
-  "key_file": "",
-  "log_level": "info"
-}
-EOF
+    echo "Membuat Sertifikat SSL..."
+    openssl req -new -newkey rsa:4096 -days 365 -nodes -x509 -subj "/C=ID/ST=Jakarta/L=Jakarta/O=Zivpn/CN=zivpn" -keyout "/etc/zivpn/zivpn.key" -out "/etc/zivpn/zivpn.crt"
+    
+    echo "Optimasi Jaringan..."
+    sysctl -w net.core.rmem_max=16777216 1> /dev/null 2> /dev/null
+    sysctl -w net.core.wmem_max=16777216 1> /dev/null 2> /dev/null
 
-[ ! -f "$META_FILE" ] && echo '{"accounts":[]}' > "$META_FILE"
-[[ ! -f "$ENV_FILE" ]] && echo -e "BOT_TOKEN=BELUM_DISET\nADMIN_ID=BELUM_DISET\nAPI_KEY=$(openssl rand -hex 16)" > "$ENV_FILE"
-
-echo "--- 4. Creating Manager & Bot Scripts ---"
-# (Bagian zivpn-manager tetap seperti sebelumnya namun dengan perbaikan restart logic)
-cat <<'EOF' > /usr/local/bin/zivpn-manager
-#!/bin/bash
-CONFIG_FILE="/etc/zivpn/config.json"
-META_FILE="/etc/zivpn/accounts_meta.json"
-ENV_FILE="/etc/zivpn/bot.env"
-
-show_config() {
-    local u=$1; local p=$2
-    local dom=$(jq -r '.domain' $CONFIG_FILE)
-    local ip=$(curl -s ipv4.icanhazip.com)
-    [[ -z "$dom" || "$dom" == "null" ]] && host=$ip || host=$dom
-    echo -e "\n--- ZIVPN ACCOUNT INFO ---\nHost/Domain: $host\nIP Server: $ip\nUsername: $u\nPassword: $p\n--------------------------\n"
-}
-
-add_user() {
-    [ -z "$1" ] && read -p "User: " u || u=$1
-    [ -z "$2" ] && read -p "Pass: " p || p=$2
-    [ -z "$3" ] && read -p "Days: " d || d=$3
-    exp=$(date -d "+$d days" +"%Y-%m-%d")
-    jq --arg u "$u" --arg p "$p" '.auth.config += [{"username":$u, "password":$p}]' "$CONFIG_FILE" > tmp.json && mv tmp.json "$CONFIG_FILE"
-    jq --arg u "$u" --arg e "$exp" '.accounts += [{"username":$u, "exp":$e}]' "$META_FILE" > tmp.json && mv tmp.json "$META_FILE"
-    systemctl restart zivpn
-    show_config "$u" "$p"
-}
-
-# (Lanjutkan fungsi delete_user, renew_user, change_domain, setup_bot dari script sebelumnya...)
-EOF
-chmod +x /usr/local/bin/zivpn-manager
-
-echo "--- 5. Setup Systemd (Hardened) ---"
-cat <<EOF > /etc/systemd/system/zivpn.service
+    cat <<EOF > /etc/systemd/system/zivpn.service
 [Unit]
-Description=ZIVPN UDP Core Service
+Description=zivpn VPN Server
 After=network.target
 
 [Service]
 Type=simple
 User=root
 WorkingDirectory=/etc/zivpn
-ExecStart=/usr/local/bin/zivpn-core -config /etc/zivpn/config.json
+ExecStart=$BIN_PATH server -c $CONFIG_FILE
 Restart=always
-RestartSec=2
-LimitNOFILE=65535
+RestartSec=3
+EOF
 
+    systemctl daemon-reload
+    systemctl enable zivpn.service
+    systemctl start zivpn.service
+    
+    # Setup IPTABLES & UFW
+    ETH=$(ip -4 route ls|grep default|grep -Po '(?<=dev )(\S+)'|head -1)
+    iptables -t nat -A PREROUTING -i $ETH -p udp --dport 6000:19999 -j DNAT --to-destination :5667
+    ufw allow 6000:19999/udp
+    ufw allow 5667/udp
+    
+    # Pasang Shortcut agar bisa dipanggil dengan ketik 'zivpn'
+    cp "$0" "$MENU_PATH"
+    chmod +x "$MENU_PATH"
+    
+    echo "--------------------------------------"
+    echo "INSTALASI BERHASIL!"
+    echo "Ketik 'zivpn' untuk membuka menu."
+    echo "--------------------------------------"
+    sleep 3
+}
+
+# --- Fitur Bot Telegram (Setup Setelah Install) ---
+setup_bot() {
+    clear
+    echo "======================================"
+    echo "      SETUP BOT TELEGRAM REMOTE       "
+    echo "======================================"
+    echo "Dapatkan Token dari @BotFather"
+    echo "Dapatkan ID Admin dari @Userinfobot"
+    echo "--------------------------------------"
+    read -p " Masukkan Token Bot: " BOT_TOKEN
+    read -p " Masukkan ID Admin : " ADMIN_ID
+    
+    if [[ -z "$BOT_TOKEN" || -z "$ADMIN_ID" ]]; then
+        echo "Token atau ID tidak boleh kosong!" ; sleep 2 ; return
+    fi
+
+    cat <<EOF > $BOT_SCRIPT
+#!/bin/bash
+TOKEN="$BOT_TOKEN"
+CHAT_ID="$ADMIN_ID"
+API_URL="https://api.telegram.org/bot\$TOKEN"
+
+while true; do
+    updates=\$(curl -s "\$API_URL/getUpdates?offset=\$(cat /tmp/t_idx 2>/dev/null || echo 0)&timeout=10")
+    for row in \$(echo "\$updates" | jq -r '.result[] | @base64'); do
+        _jq() { echo \${row} | base64 --decode | jq -r \${1}; }
+        update_id=\$(_jq '.update_id')
+        chat_id=\$(_jq '.message.chat.id')
+        text=\$(_jq '.message.text')
+        echo \$((update_id + 1)) > /tmp/t_idx
+
+        if [[ "\$chat_id" == "\$CHAT_ID" ]]; then
+            case \$text in
+                "/start"|"/menu")
+                    msg="🏠 *ZIVPN UDP MENU*%0A%0A1. /add\_akun - Create Akun%0A2. /del\_akun - Hapus Akun%0A3. /list - List Akun%0A4. /vps - Info Status VPS%0A5. /restart - Restart Server" ;;
+                "/add_"*)
+                    new_pw=\${text#/add_}
+                    if [[ -z "\$new_pw" || "\$text" == "/add_akun" ]]; then
+                        msg="Format salah! Gunakan: \`/add_PASSWORD\`%0AContoh: \`/add_vip77\`"
+                    else
+                        sed -i "s/\"config\": \[/\"config\": [\"\$new_pw\", /g" $CONFIG_FILE
+                        systemctl restart zivpn.service
+                        msg="✅ *AKUN BERHASIL DIBUAT*%0A%0AIP: \$(curl -s ifconfig.me)%0APass: \$new_pw%0APort: 6000-19999"
+                    fi ;;
+                "/del_"*)
+                    del_pw=\${text#/del_}
+                    if [[ -z "\$del_pw" || "\$text" == "/del_akun" ]]; then
+                        accs=\$(grep -Po '(?<="config": \[).*?(?=\])' $CONFIG_FILE | tr -d '" ' | tr ',' '\n' | grep -v '^$')
+                        msg="Ketik: \`/del_PASSWORD\`%0A%0A*LIST PW:*%0A\$accs"
+                    else
+                        sed -i "s/\"\$del_pw\"//g" $CONFIG_FILE
+                        sed -i 's/\[,/\[/g; s/,,/,/g; s/, ]/]/g; s/,]/]/g' $CONFIG_FILE
+                        systemctl restart zivpn.service
+                        msg="🗑 Akun \`\$del_pw\` telah dihapus."
+                    fi ;;
+                "/list")
+                    accs=\$(grep -Po '(?<="config": \[).*?(?=\])' $CONFIG_FILE | tr -d '" ' | tr ',' '\n' | grep -v '^$')
+                    msg="📂 *AKUN AKTIF:*%0A\$accs" ;;
+                "/vps")
+                    msg="📊 *INFO VPS*%0A%0AIP: \$(curl -s ifconfig.me)%0ARAM: \$(free -h | awk '/^Mem:/ {print \$3}')/\$(free -h | awk '/^Mem:/ {print \$2}')%0AUptime: \$(uptime -p)" ;;
+                "/restart")
+                    systemctl restart zivpn.service ; msg="🔄 Service Restarted!" ;;
+            esac
+            curl -s -X POST "\$API_URL/sendMessage" -d chat_id="\$chat_id" -d text="\$msg" -d parse_mode="Markdown" > /dev/null
+        fi
+    done
+    sleep 2
+done
+EOF
+    chmod +x $BOT_SCRIPT
+    
+    # Create Systemd Bot Service
+    cat <<EOF > /etc/systemd/system/zivpn-bot.service
+[Unit]
+Description=Zivpn Telegram Bot Service
+After=network.target
+[Service]
+ExecStart=$BOT_SCRIPT
+Restart=always
 [Install]
 WantedBy=multi-user.target
 EOF
+    systemctl daemon-reload && systemctl enable zivpn-bot.service && systemctl start zivpn-bot.service
+    echo "Bot Berhasil Diaktifkan! Silakan cek Telegram Anda." ; sleep 2
+}
 
-# Bot script (Tetap sama)
-# [Script Bot Python diletakkan di sini]
+# --- Logika Utama (Loop Menu VPS) ---
 
-echo "--- 6. Finalizing ---"
-ln -sf /usr/local/bin/zivpn-manager /usr/local/bin/menu
-ln -sf /usr/local/bin/zivpn-manager /usr/local/bin/zivpn
-ufw allow 5667/udp >/dev/null 2>&1
-ufw allow 80/tcp >/dev/null 2>&1
+# Cek apakah sudah terinstall
+if [ ! -f "$BIN_PATH" ]; then
+    install_zivpn
+fi
 
-systemctl daemon-reload
-systemctl enable zivpn zivpn-bot
-systemctl start zivpn zivpn-bot
+while true; do
+    clear
+    # INFO VPS DI ATAS MENU
+    IP_VPS=$(get_ip)
+    UPTIME=$(uptime -p | cut -d " " -f 2-)
+    RAM=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
+    OS=$(lsb_release -ds)
+    DOMAIN=$(openssl x509 -noout -subject -in /etc/zivpn/zivpn.crt 2>/dev/null | sed -n '/^subject/s/^.*CN = //p')
 
-echo "========================================"
-echo " INSTALASI SELESAI & BINARY DIPERBAIKI"
-echo " Ketik 'menu' untuk mengelola VPS Anda."
-echo "========================================"
+    echo "======================================================"
+    echo "                ZIVPN UDP DASHBOARD                  "
+    echo "======================================================"
+    echo " OS     : $OS"
+    echo " IP     : $IP_VPS"
+    echo " RAM    : $RAM"
+    echo " Uptime : $UPTIME"
+    echo " Status : $(systemctl is-active zivpn) | Bot: $(systemctl is-active zivpn-bot 2>/dev/null || echo 'off')"
+    echo "======================================================"
+    echo "  1) Create Akun (Tambah)   4) Change Domain/Host"
+    echo "  2) Hapus Akun             5) Restart Service"
+    echo "  3) List Semua Akun        6) SETUP BOT TELEGRAM"
+    echo "  x) Exit"
+    echo "======================================================"
+    read -p " Pilih menu [1-6 atau x]: " opt
+
+    case $opt in
+        1)
+            echo -e "\n--- CREATE NEW ACCOUNT ---"
+            read -p "Masukkan Password Baru: " new_pass
+            if [[ -n "$new_pass" ]]; then
+                sed -i "s/\"config\": \[/\"config\": [\"$new_pass\", /g" $CONFIG_FILE
+                systemctl restart zivpn.service
+                clear
+                echo "=============================="
+                echo "     AKUN BERHASIL DIBUAT     "
+                echo "=============================="
+                echo " Host : ${DOMAIN:-$IP_VPS}"
+                echo " IP   : $IP_VPS"
+                echo " Pass : $new_pass"
+                echo " Port : 6000-19999 (UDP)"
+                echo "=============================="
+                read -p "Tekan Enter untuk kembali..."
+            fi ;;
+        2)
+            echo -e "\n--- DELETE ACCOUNT ---"
+            read -p "Masukkan Password yang ingin dihapus: " del_pass
+            sed -i "s/\"$del_pass\"//g" $CONFIG_FILE
+            sed -i 's/\[,/\[/g; s/,,/,/g; s/, ]/]/g; s/,]/]/g' $CONFIG_FILE
+            systemctl restart zivpn.service
+            echo "Akun '$del_pass' telah dihapus." ; sleep 1 ;;
+        3)
+            echo -e "\n--- LIST AKUN AKTIF ---"
+            grep -Po '(?<="config": \[).*?(?=\])' $CONFIG_FILE | tr -d '" ' | tr ',' '\n' | grep -v '^$'
+            echo "-----------------------" ; read -p "Tekan Enter..." ;;
+        4)
+            read -p "Masukkan Domain Baru: " new_dom
+            openssl req -new -newkey rsa:4096 -days 365 -nodes -x509 -subj "/C=ID/ST=Jakarta/L=Jakarta/O=Zivpn/CN=$new_dom" -keyout "/etc/zivpn/zivpn.key" -out "/etc/zivpn/zivpn.crt"
+            systemctl restart zivpn.service ; echo "Domain Diperbarui!" ; sleep 1 ;;
+        5) systemctl restart zivpn.service ; echo "Restarted!" ; sleep 1 ;;
+        6) setup_bot ;;
+        x) exit ;;
+    esac
+done
