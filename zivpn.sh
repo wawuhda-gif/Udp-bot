@@ -1,6 +1,6 @@
 #!/bin/bash
-# Zivpn UDP Module Manager (Full Version)
-# Fitur: Masa Aktif, Bot Telegram, & Tampilan Detail
+# Zivpn UDP Module Manager (Integrated & Fixed)
+# Fitur: Masa Aktif, Bot Telegram (IP, Pass, Exp Berurutan), & JQ Support
 
 CONFIG_FILE="/etc/zivpn/config.json"
 BIN_PATH="/usr/local/bin/zivpn"
@@ -8,7 +8,7 @@ MENU_PATH="/usr/local/bin/zivpn"
 BOT_SCRIPT="/etc/zivpn/zivpn-bot.sh"
 EXP_FILE="/etc/zivpn/expiration.db"
 
-# Inisialisasi Database
+# Inisialisasi Database & Folder
 mkdir -p /etc/zivpn
 touch $EXP_FILE
 
@@ -32,15 +32,35 @@ install_zivpn() {
     echo "======================================"
     echo "      MEMULAI INSTALASI ZIVPN          "
     echo "======================================"
-    echo "Mengupdate Server & Dependensi..."
-    sudo apt-get update && sudo apt-get install jq curl lsb-release openssl -y
     
-    systemctl stop zivpn.service 1> /dev/null 2> /dev/null
+    mkdir -p /etc/zivpn
+    mkdir -p /usr/local/bin
+
+    echo "Mengupdate Server & Dependensi..."
+    sudo apt-get update -y && sudo apt-get install jq curl wget lsb-release openssl -y
     
     echo "Mendownload UDP Service..."
-    wget https://github.com/zahidbd2/udp-zivpn/releases/download/udp-zivpn_1.4.9/udp-zivpn-linux-amd64 -O $BIN_PATH 1> /dev/null 2> /dev/null
-    chmod +x $BIN_PATH
-    wget https://raw.githubusercontent.com/zahidbd2/udp-zivpn/main/config.json -O $CONFIG_FILE 1> /dev/null 2> /dev/null
+    rm -f $BIN_PATH
+    wget -q --show-progress "https://github.com/zahidbd2/udp-zivpn/releases/download/udp-zivpn_1.4.9/udp-zivpn-linux-amd64" -O $BIN_PATH
+    
+    if [[ ! -f "$BIN_PATH" || ! -s "$BIN_PATH" ]]; then
+        echo "❌ Gagal mendownload! Mencoba link alternatif..."
+        wget -q --show-progress "https://raw.githubusercontent.com/zahidbd2/udp-zivpn/main/udp-zivpn-linux-amd64" -O $BIN_PATH
+    fi
+
+    if [[ -f "$BIN_PATH" ]]; then
+        chmod +x $BIN_PATH
+        echo "✅ Binary berhasil diinstal."
+    else
+        echo "❌ Gagal mendownload binary. Cek internet!"
+        exit 1
+    fi
+
+    echo "Mendownload Config..."
+    wget -q "https://raw.githubusercontent.com/zahidbd2/udp-zivpn/main/config.json" -O $CONFIG_FILE
+    if [[ ! -s "$CONFIG_FILE" ]]; then
+        echo '{"interface":"eth0","local_addr":":5667","config":["admin"]}' > $CONFIG_FILE
+    fi
 
     echo "Membuat Sertifikat SSL..."
     openssl req -new -newkey rsa:4096 -days 365 -nodes -x509 -subj "/C=ID/ST=Jakarta/L=Jakarta/O=Zivpn/CN=zivpn" -keyout "/etc/zivpn/zivpn.key" -out "/etc/zivpn/zivpn.crt"
@@ -58,14 +78,14 @@ Restart=always
 RestartSec=3
 EOF
 
-    systemctl daemon-reload && systemctl enable zivpn.service && systemctl start zivpn.service
+    systemctl daemon-reload && systemctl enable zivpn.service && systemctl restart zivpn.service
     
     ETH=$(ip -4 route ls|grep default|grep -Po '(?<=dev )(\S+)'|head -1)
     iptables -t nat -A PREROUTING -i $ETH -p udp --dport 6000:19999 -j DNAT --to-destination :5667
     
     cp "$0" "$MENU_PATH"
     chmod +x "$MENU_PATH"
-    echo "INSTALASI BERHASIL! Ketik 'zivpn' untuk menu."
+    echo "INSTALASI SELESAI! Ketik 'zivpn' untuk menu."
     sleep 2
 }
 
@@ -75,10 +95,6 @@ setup_bot() {
     echo "=============================================="
     echo "         SETUP BOT TELEGRAM REMOTE            "
     echo "=============================================="
-    echo "CARA MENDAPATKAN TOKEN & ID:"
-    echo "1. Token: Chat @BotFather -> /newbot"
-    echo "2. ID Admin: Chat @Userinfobot -> Klik Start"
-    echo "----------------------------------------------"
     read -p " 1. Masukkan Token Bot: " BOT_TOKEN
     read -p " 2. Masukkan ID Admin : " ADMIN_ID
     
@@ -86,69 +102,76 @@ setup_bot() {
         echo -e "\n[!] Token atau ID tidak boleh kosong!" ; sleep 2 ; return
     fi
 
-    # Script untuk menjalankan bot
-    cat <<EOF > $BOT_SCRIPT
+    cat <<'EOF' > $BOT_SCRIPT
 #!/bin/bash
-TOKEN="$BOT_TOKEN"
-CHAT_ID="$ADMIN_ID"
-API_URL="https://api.telegram.org/bot\$TOKEN"
-EXP_FILE="$EXP_FILE"
-CONFIG_FILE="$CONFIG_FILE"
+TOKEN="REPLACE_TOKEN"
+CHAT_ID="REPLACE_ADMIN"
+API_URL="https://api.telegram.org/bot$TOKEN"
+EXP_FILE="/etc/zivpn/expiration.db"
+CONFIG_FILE="/etc/zivpn/config.json"
 
 while true; do
-    updates=\$(curl -s "\$API_URL/getUpdates?offset=\$(cat /tmp/t_idx 2>/dev/null || echo 0)&timeout=10")
-    for row in \$(echo "\$updates" | jq -r '.result[] | @base64'); do
-        _jq() { echo \${row} | base64 --decode | jq -r \${1}; }
-        update_id=\$(_jq '.update_id')
-        chat_id=\$(_jq '.message.chat.id')
-        text=\$(_jq '.message.text')
-        echo \$((update_id + 1)) > /tmp/t_idx
+    updates=$(curl -s "$API_URL/getUpdates?offset=$(cat /tmp/t_idx 2>/dev/null || echo 0)&timeout=10")
+    last_idx=$(echo "$updates" | jq -r '.result[-1].update_id')
+    [[ "$last_idx" != "null" ]] && echo $((last_idx + 1)) > /tmp/t_idx
 
-        if [[ "\$chat_id" == "\$CHAT_ID" ]]; then
-            case \$text in
+    for row in $(echo "$updates" | jq -r '.result[] | @base64'); do
+        _jq() { echo ${row} | base64 --decode | jq -r ${1}; }
+        chat_id=$(_jq '.message.chat.id')
+        text=$(_jq '.message.text')
+
+        if [[ "$chat_id" == "$CHAT_ID" ]]; then
+            case $text in
                 "/start"|"/menu")
-                    msg="🏠 *ZIVPN UDP MENU*%0A%0A1. \`/add_PASS_HARI\` - Buat Akun%0A2. \`/del_PASS\` - Hapus Akun%0A3. /list - Daftar Akun%0A4. /vps - Status VPS" ;;
+                    msg="🏠 *ZIVPN UDP BOT*%0A━━━━━━━━━━━━━━━%0A*Buat:* \`/add [pass] [hari]\`%0A*Hapus:* \`/del [pass]\`%0A*List:* /list%0A*Status:* /vps" ;;
                 
-                "/add_"*)
-                    input=\${text#/add_}
-                    IFS='_' read -r user days <<< "\$input"
-                    if [[ -z "\$user" || -z "\$days" ]]; then
-                        msg="❌ Format salah!%0AGunakan: \`/add_PASSWORD_HARI\`%0AContoh: \`/add_vip77_30\`"
+                "/add "*)
+                    u_pass=$(echo $text | awk '{print $2}')
+                    u_days=$(echo $text | awk '{print $3}')
+                    if [[ -z "$u_pass" || -z "$u_days" ]]; then
+                        msg="❌ Gunakan: \`/add [pass] [hari]\`"
                     else
-                        exp=\$(date -d "+\$days days" +%Y-%m-%d)
-                        sed -i "s/\"config\": \[/\"config\": [\"\$user\", /g" \$CONFIG_FILE
-                        echo "\$user:\$exp" >> \$EXP_FILE
+                        exp=$(date -d "+$u_days days" +%Y-%m-%d)
+                        ip=$(curl -s ifconfig.me)
+                        tmp=$(mktemp)
+                        jq --arg u "$u_pass" '.config += [$u]' $CONFIG_FILE > $tmp && mv $tmp $CONFIG_FILE
+                        echo "$u_pass:$exp" >> $EXP_FILE
                         systemctl restart zivpn.service
-                        msg="✅ *AKUN BERHASIL DIBUAT*%0A------------------------%0AUser: \`\$user\`%0AExp: \$exp (\$days Hari)%0AIP: \$(curl -s ifconfig.me)%0A------------------------"
+                        msg="✅ *AKUN BERHASIL DIBUAT*%0A━━━━━━━━━━━━━━━%0A🌐 *IP VPS:* \`$ip\`%0A🔑 *Pass:* \`$u_pass\`%0A📅 *Exp:* \`$exp\` ($u_days Hari)%0A━━━━━━━━━━━━━━━"
                     fi ;;
 
-                "/del_"*)
-                    user=\${text#/del_}
-                    if grep -q "^\$user:" "\$EXP_FILE"; then
-                        sed -i "s/\"\$user\"//g" \$CONFIG_FILE
-                        sed -i 's/\[,/\[/g; s/,,/,/g; s/, ]/]/g; s/,]/]/g' \$CONFIG_FILE
-                        sed -i "/^\$user:/d" \$EXP_FILE
+                "/del "*)
+                    u_del=$(echo $text | awk '{print $2}')
+                    if grep -q "^$u_del:" "$EXP_FILE"; then
+                        tmp=$(mktemp)
+                        jq --arg u "$u_del" '.config -= [$u]' $CONFIG_FILE > $tmp && mv $tmp $CONFIG_FILE
+                        sed -i "/^$u_del:/d" $EXP_FILE
                         systemctl restart zivpn.service
-                        msg="🗑 Akun \`\$user\` Berhasil Dihapus!"
+                        msg="🗑 Akun \`$u_del\` Dihapus!"
                     else
-                        msg="❌ Akun \`\$user\` Tidak Ditemukan!"
+                        msg="❌ Akun tidak ditemukan!"
                     fi ;;
 
                 "/list")
-                    accs=\$(cat \$EXP_FILE | column -t -s ":")
-                    [ -z "\$accs" ] && accs="Kosong"
-                    msg="📂 *DAFTAR AKUN AKTIF:*%0A\`\`\`%0A\$accs%0A\`\`\`" ;;
+                    res="📂 *DAFTAR AKUN AKTIF*%0A🌐 *IP:* \`$(curl -s ifconfig.me)\`%0A━━━━━━━━━━━━━━━%0A"
+                    while IFS=":" read -r u e; do
+                        res+="👤 \`$u\` -> Exp: \`$e\`%0A"
+                    done < $EXP_FILE
+                    msg="$res" ;;
 
                 "/vps")
-                    msg="📊 *STATUS VPS*%0AIP: \$(curl -s ifconfig.me)%0ARAM: \$(free -h | awk '/^Mem:/ {print \$3}')%0AAktif: \$(grep -c '^' \$EXP_FILE) User" ;;
+                    msg="📊 *STATUS VPS*%0AIP: \`$(curl -s ifconfig.me)\`%0ARAM: \`$(free -h | awk '/^Mem:/ {print $3}')\`" ;;
             esac
-            curl -s -X POST "\$API_URL/sendMessage" -d chat_id="\$chat_id" -d text="\$msg" -d parse_mode="Markdown" > /dev/null
+            curl -s -X POST "$API_URL/sendMessage" -d chat_id="$chat_id" -d text="$msg" -d parse_mode="Markdown" > /dev/null
         fi
     done
     sleep 2
 done
 EOF
+    sed -i "s/REPLACE_TOKEN/$BOT_TOKEN/g" $BOT_SCRIPT
+    sed -i "s/REPLACE_ADMIN/$ADMIN_ID/g" $BOT_SCRIPT
     chmod +x $BOT_SCRIPT
+
     cat <<EOF > /etc/systemd/system/zivpn-bot.service
 [Unit]
 Description=Zivpn Telegram Bot
@@ -159,96 +182,60 @@ Restart=always
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload && systemctl enable zivpn-bot.service && systemctl start zivpn-bot.service
-    echo -e "\n[+] Bot Berhasil Diaktifkan!" ; sleep 2
+    systemctl daemon-reload && systemctl enable zivpn-bot.service && systemctl restart zivpn-bot.service
+    echo -e "\n[+] Bot Berhasil Aktif!" ; sleep 2
 }
 
-# --- Logika Utama (Dashboard) ---
+# --- Dashboard Utama ---
 if [ ! -f "$BIN_PATH" ]; then install_zivpn; fi
 
 while true; do
     clear
     IP_VPS=$(get_ip)
-    UPTIME=$(uptime -p | cut -d " " -f 2-)
-    RAM=$(free -h | awk '/^Mem:/ {print $3 "/" $2}')
-    OS=$(lsb_release -ds)
-    ACC_COUNT=$(count_active_acc)
-    DOMAIN=$(openssl x509 -noout -subject -in /etc/zivpn/zivpn.crt 2>/dev/null | sed -n '/^subject/s/^.*CN = //p')
-
     echo "======================================================"
     echo "                ZIVPN UDP DASHBOARD                  "
     echo "======================================================"
-    echo " OS     : $OS"
-    echo " IP     : $IP_VPS"
-    echo " RAM    : $RAM"
-    echo " AKUN AKTIF : $ACC_COUNT Akun"
+    echo " IP VPS : $IP_VPS"
     echo " STATUS : $(systemctl is-active zivpn) | Bot: $(systemctl is-active zivpn-bot 2>/dev/null || echo 'off')"
     echo "======================================================"
-    echo "  1) Buat Akun (Masa Aktif)    4) Ganti Domain/Host"
-    echo "  2) Hapus Akun                5) Restart Service"
-    echo "  3) List Semua Akun           6) SETUP BOT TELEGRAM"
+    echo "  1) Buat Akun (Masa Aktif)"
+    echo "  2) Hapus Akun"
+    echo "  3) List Semua Akun (Detail IP/Pass/Exp)"
+    echo "  4) Restart Service"
+    echo "  5) SETUP BOT TELEGRAM"
     echo "  x) Keluar"
     echo "======================================================"
-    read -p " Pilih menu [1-6 atau x]: " opt
+    read -p " Pilih menu: " opt
 
     case $opt in
         1)
-            echo -e "\n--- BUAT AKUN BARU ---"
-            read -p " Password Akun: " new_pass
-            read -p " Masa Aktif (Hari): " durasi
-            if [[ -n "$new_pass" && -n "$durasi" ]]; then
+            read -p " Password: " new_pass
+            read -p " Hari: " durasi
+            if [[ -n "$new_pass" ]]; then
                 exp_date=$(date -d "+$durasi days" +%Y-%m-%d)
-                sed -i "s/\"config\": \[/\"config\": [\"$new_pass\", /g" $CONFIG_FILE
+                tmp=$(mktemp)
+                jq --arg u "$new_pass" '.config += [$u]' $CONFIG_FILE > $tmp && mv $tmp $CONFIG_FILE
                 echo "$new_pass:$exp_date" >> $EXP_FILE
                 systemctl restart zivpn.service
-                clear
-                echo "=============================="
-                echo "      AKUN BERHASIL DIBUAT    "
-                echo "=============================="
-                echo " Host   : ${DOMAIN:-$IP_VPS}"
-                echo " Pass   : $new_pass"
-                echo " Exp    : $exp_date ($durasi Hari)"
-                echo " Port   : 6000-19999 (UDP)"
-                echo "=============================="
-                read -p "Tekan Enter untuk kembali..."
+                echo -e "\n✅ BERHASIL: IP: $IP_VPS | Pass: $new_pass | Exp: $exp_date"
+                read -p "Enter..."
             fi ;;
         2)
-            echo -e "\n--- DAFTAR AKUN YANG AKAN DIHAPUS ---"
-            printf "%-5s %-20s %-15s\n" "NO" "PASSWORD" "EXPIRED"
-            echo "-------------------------------------------"
-            i=1
-            while IFS=":" read -r u e; do
-                printf "%-5s %-20s %-15s\n" "$i" "$u" "$e"
-                ((i++))
-            done < $EXP_FILE
-            echo "-------------------------------------------"
-            read -p " Masukkan Password yang akan dihapus: " del_pass
-            if grep -q "^$del_pass:" "$EXP_FILE"; then
-                sed -i "s/\"$del_pass\"//g" $CONFIG_FILE
-                sed -i 's/\[,/\[/g; s/,,/,/g; s/, ]/]/g; s/,]/]/g' $CONFIG_FILE
-                sed -i "/^$del_pass:/d" $EXP_FILE
-                systemctl restart zivpn.service
-                echo -e "\n[+] Akun '$del_pass' Telah Dihapus!"
-            else
-                echo -e "\n[!] Akun Tidak Ditemukan!"
-            fi
-            sleep 2 ;;
-        3)
-            echo -e "\n--- DAFTAR SEMUA AKUN ---"
-            printf "%-20s %-15s\n" "PASSWORD" "EXPIRED"
-            echo "-----------------------------------"
-            while IFS=":" read -r u e; do
-                printf "%-20s %-15s\n" "$u" "$e"
-            done < $EXP_FILE
-            echo "-----------------------------------"
-            read -p "Tekan Enter untuk kembali..." ;;
-        4)
-            read -p " Domain Baru: " new_dom
-            openssl req -new -newkey rsa:4096 -days 365 -nodes -x509 -subj "/C=ID/ST=Jakarta/L=Jakarta/O=Zivpn/CN=$new_dom" -keyout "/etc/zivpn/zivpn.key" -out "/etc/zivpn/zivpn.crt"
+            read -p " Password dihapus: " del_p
+            tmp=$(mktemp)
+            jq --arg u "$del_p" '.config -= [$u]' $CONFIG_FILE > $tmp && mv $tmp $CONFIG_FILE
+            sed -i "/^$del_p:/d" $EXP_FILE
             systemctl restart zivpn.service
-            echo "Domain diperbarui ke $new_dom" ; sleep 1 ;;
-        5) systemctl restart zivpn.service ; echo "Service Restarted!" ; sleep 1 ;;
-        6) setup_bot ;;
+            echo "Dihapus!" ; sleep 1 ;;
+        3)
+            echo -e "\n--- DAFTAR AKUN ---"
+            printf "%-15s | %-12s | %-12s\n" "IP VPS" "PASSWORD" "EXPIRED"
+            while IFS=":" read -r u e; do
+                printf "%-15s | %-12s | %-12s\n" "$IP_VPS" "$u" "$e"
+            done < $EXP_FILE
+            read -p "Enter..." ;;
+        4) systemctl restart zivpn.service ; echo "Restarted" ; sleep 1 ;;
+        5) setup_bot ;;
         x) exit ;;
     esac
 done
